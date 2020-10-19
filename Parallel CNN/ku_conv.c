@@ -26,8 +26,7 @@ int main(int argc, char** argv) {
     int size = atoi(argv[1]);   // input Matrix size
     int convResSize = size - 3 + 1;  // Convolutional Layer 의 output Matrix size 
     int numofmsg = convResSize * convResSize; // conv 연산을 수행할 3*3 Matrix 개수
-    int arr[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
-    unsigned int prio = 0; // TODO: 수정
+
 
     // input Matrix 생성 
     int** inputMtx = (int**)malloc(sizeof(int*) * size);
@@ -36,6 +35,7 @@ int main(int argc, char** argv) {
     }
 
     makeMatrix(inputMtx, size, size);
+
 
     // convolution 결과를 저장할 배열 
     int** convRes = (int**)malloc(sizeof(int*) * convResSize);
@@ -146,36 +146,6 @@ void makeCworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
     }
 }
 
-void makePworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
-
-    int input[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
-    unsigned int prio = 0;
-
-    for (int i = 0; i < count; i++) {
-        if (fork() == 0) {
-
-            if (mq_receive(mqdes, (char*)input, sizeof(input), &prio) == -1) {
-                perror("mq_receive()");
-            }
-
-            // Max-pooling 연산 수행
-            int max = input[0][0];
-            for (int j = 0; j < 2; j++) {
-                for (int k = 0; k < 2; k++) {
-                    if (input[j][k] > max)
-                        max = input[j][k];
-                }
-            }
-
-            if (mq_send(mqdes2, (char*)&max, sizeof(max), prio) == -1) {
-                perror("mq_send()");
-            }
-
-            exit(0);
-        }
-    }
-}
-
 void insertConvInputtoQ(mqd_t mqdes, int** inputMtx, int numofmsg, int convResSize) {
 
     int arr[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
@@ -201,14 +171,42 @@ void receiveConvRes(mqd_t mqdes, int** convRes, int numofmsg, int convResSize) {
     unsigned int prio = 0;
     int tmp = 0;
 
-    for (int i = 0; i < convResSize; i++) { // TODO: 수정
-        for (int j = 0; j < convResSize; j++) {
+    for (int i = 0; i < numofmsg; i++) {
 
-            if (mq_receive(mqdes, (char*)&tmp, 4, &prio) == -1) {
+        if (mq_receive(mqdes, (char*)&tmp, 4, &prio) == -1) {
+            perror("mq_receive()");
+        }
+
+        convRes[(numofmsg - prio) / convResSize][(numofmsg - prio) % convResSize] = tmp;
+    }
+
+}
+
+void makePworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
+
+    int input[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    unsigned int prio = 0;
+
+    for (int i = 0; i < count; i++) {
+        if (fork() == 0) {
+
+            if (mq_receive(mqdes, (char*)input, sizeof(input), &prio) == -1) {
                 perror("mq_receive()");
             }
 
-            convRes[(numofmsg - prio) / convResSize][(numofmsg - prio) % convResSize] = tmp;
+            // Max-pooling 연산 수행
+            int max = input[0][0];
+            int j = 0;
+            while (j++ < 3)
+                if (input[j / 2][j % 2] > max)
+                    max = input[j / 2][j % 2];
+
+
+            if (mq_send(mqdes2, (char*)&max, sizeof(max), prio) == -1) {
+                perror("mq_send()");
+            }
+
+            exit(0);
         }
     }
 }
@@ -245,12 +243,12 @@ void receiveFinalRes(mqd_t mqdes, int* result, int numofmsg) {
 }
 
 void handler(int sig) {
-    int child_status;
+
     pid_t pid;
 
     while ((pid = waitpid(-1, NULL, WNOHANG)) > 0) {
         // printf("%d process reaping\n", pid);
     }
     // if (errno != ECHILD)
-    //     Sio_error("waitpid error");
+    //     sio_error("waitpid error");
 }
