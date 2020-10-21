@@ -9,12 +9,12 @@
 #define NAME2 "/m_queue2"
 
 void makeMatrix(int** matrix, int X, int Y);
-void makeCworkers(int count, mqd_t mqdes, mqd_t mqdes2);
-void insertConvInputtoQ(mqd_t mqdes, int** inputMtx, int numofmsg, int convResSize);
-void makePworkers(int count, mqd_t mqdes, mqd_t mqdes2);
-void receiveConvRes(mqd_t mqdes, int** convRes, int numofmsg, int convResSize);
-void insertPoolInputtoQ(mqd_t mqdes, int** convRes, int numofmsg, int convResSize);
-void receiveFinalRes(mqd_t mqdes, int* result, int numofmsg);
+void makeCworkers(mqd_t mqdes, mqd_t mqdes2, int max_prc, int upper_loop_i, int term);
+void insertConvInputtoQ(mqd_t mqdes, int max_prc, int term, int upper_loop_i, int** inputMtx, int convResSize);
+void makePworkers(mqd_t mqdes, mqd_t mqdes2, int max_prc, int upper_loop_i, int term);
+void receiveConvRes(mqd_t mqdes, int** convRes, int max_prc, int upper_loop_i, int term, int convResSize);
+void insertPoolInputtoQ(mqd_t mqdes, int** convRes, int term, int max_prc, int upper_loop_i, int convResSize);
+void receiveFinalRes(mqd_t mqdes, int max_prc, int upper_loop_i, int term, int* result);
 void handler(int sig);
 
 
@@ -67,35 +67,52 @@ int main(int argc, char** argv) {
         exit(0);
     }
 
-    // numofmsg 개의 child process 생성하여 convolution 연산 수행
-    makeCworkers(numofmsg, mqdes, mqdes2);
+
+    int max_prc = 3000;    // 생성할 수 있는 자식 프로세스의 최대 개수이며, 연산에 필요한 자식 개수가 이 값을 넘어갈 경우, 10000번씩 끊어서 자식을 생성하고 처리한다.
+
+    for (int a = 0; a < numofmsg / max_prc + 1; a++) {
+        int term;
+        if (numofmsg - max_prc * a < max_prc)
+            term = numofmsg - max_prc * a;
+        else
+            term = max_prc;
+
+        // convolution 연산을 수행하는 child process 생성
+        makeCworkers(mqdes, mqdes2, max_prc, a, term);
+
+        // convolution 3x3 input을 message queue에 넣는 과정
+        insertConvInputtoQ(mqdes, max_prc, term, a, inputMtx, convResSize);
+
+        // message queue 에서 convolution 결과를 받아 convRes 배열에 저장
+        receiveConvRes(mqdes2, convRes, max_prc, a, term, convResSize);
+
+    }
 
 
-    // input Matrix를 Filter 크기만큼 분할하여 Message queue에 저장    
-    insertConvInputtoQ(mqdes, inputMtx, numofmsg, convResSize);
+    for (int a = 0; a < (numofmsg / 4) / max_prc + 1; a++) {
+        int term;
+        if (numofmsg / 4 - max_prc * a < max_prc)
+            term = numofmsg / 4 - max_prc * a;
+        else
+            term = max_prc;
 
+        // max_pooling 연산을 수행하는 child process 생성
+        makePworkers(mqdes, mqdes2, max_prc, a, term);
 
-    // message queue에서 convolution 결과를 받아 convRes 배열에 저장
-    receiveConvRes(mqdes2, convRes, numofmsg, convResSize);
+        // max_pooling 2x2 input을 message queue에 넣는 과정
+        insertPoolInputtoQ(mqdes, convRes, term, max_prc, a, convResSize);
 
+        // message queue 에서 max-pooling 결과를 받아 Result 배열에 저장
+        receiveFinalRes(mqdes2, max_prc, a, term, result);
 
-    // numofmsg/4 개의 child process 생성하여 Max-pooling 연산 수행
-    makePworkers(numofmsg / 4, mqdes, mqdes2);
-
-
-    // max_pooling 2x2 input을 message queue에 넣는 과정
-    insertPoolInputtoQ(mqdes, convRes, numofmsg / 4, convResSize);
-
-
-    // message queue 에서 Max-pooling 결과를 받아 Result 배열에 저장
-    receiveFinalRes(mqdes2, result, numofmsg / 4);
+    }
 
 
     // Final output 출력
-    for (int i = numofmsg / 4 - 1; i > 0; i--) {
+    for (int i = 0; i < numofmsg / 4 - 1; i++) {
         printf("%d ", result[i]);
     }
-    printf("%d", result[0]);
+    printf("%d", result[numofmsg / 4 - 1]);
 
     // 동적할당 배열 Free
     for (int i = 0; i < size; i++) {
@@ -113,18 +130,17 @@ int main(int argc, char** argv) {
     mq_unlink(NAME);
     mq_close(mqdes2);
     mq_unlink(NAME2);
-
 }
 
 
-void makeCworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
+void makeCworkers(mqd_t mqdes, mqd_t mqdes2, int max_prc, int upper_loop_i, int term) {
 
+    unsigned int prio = 0;
     int filter[3][3] = { { -1, -1, -1 }, { -1, 8, -1 }, { -1, -1, -1 } };
     int input[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
-    unsigned int prio = 0;
-    int result = 0;     // convolution 연산 결과
+    int result = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = max_prc * upper_loop_i; i < max_prc * upper_loop_i + term; i++) {
 
         if (fork() == 0) {
 
@@ -146,11 +162,11 @@ void makeCworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
     }
 }
 
-void insertConvInputtoQ(mqd_t mqdes, int** inputMtx, int numofmsg, int convResSize) {
-
+void insertConvInputtoQ(mqd_t mqdes, int max_prc, int term, int upper_loop_i, int** inputMtx, int convResSize) {
     int arr[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
+    int prio = term;
 
-    for (int i = 0; i < numofmsg; i++) {
+    for (int i = max_prc * upper_loop_i; i < max_prc * upper_loop_i + term; i++) {
 
         // Filter 크기 만큼 분할
         for (int j = i / convResSize; j < i / convResSize + 3; j++) {
@@ -160,34 +176,32 @@ void insertConvInputtoQ(mqd_t mqdes, int** inputMtx, int numofmsg, int convResSi
         }
 
         // message queue 에 분할한 행렬 삽입
-        if (mq_send(mqdes, (char*)arr, sizeof(arr), numofmsg - i) == -1) {
+        if (mq_send(mqdes, (char*)arr, sizeof(arr), prio--) == -1) {
             perror("mq_send()");
         }
     }
 }
 
-void receiveConvRes(mqd_t mqdes, int** convRes, int numofmsg, int convResSize) {
+void receiveConvRes(mqd_t mqdes, int** convRes, int max_prc, int upper_loop_i, int term, int convResSize) {
 
     unsigned int prio = 0;
     int tmp = 0;
 
-    for (int i = 0; i < numofmsg; i++) {
+    for (int i = max_prc * upper_loop_i; i < max_prc * upper_loop_i + term; i++) {
 
         if (mq_receive(mqdes, (char*)&tmp, 4, &prio) == -1) {
             perror("mq_receive()");
         }
-
-        convRes[(numofmsg - prio) / convResSize][(numofmsg - prio) % convResSize] = tmp;
+        convRes[(max_prc * upper_loop_i + (term - prio)) / convResSize][(max_prc * upper_loop_i + (term - prio)) % convResSize] = tmp;
     }
-
 }
 
-void makePworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
+void makePworkers(mqd_t mqdes, mqd_t mqdes2, int max_prc, int upper_loop_i, int term) {
 
     int input[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
     unsigned int prio = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = max_prc * upper_loop_i; i < max_prc * upper_loop_i + term; i++) {
         if (fork() == 0) {
 
             if (mq_receive(mqdes, (char*)input, sizeof(input), &prio) == -1) {
@@ -211,34 +225,34 @@ void makePworkers(int count, mqd_t mqdes, mqd_t mqdes2) {
     }
 }
 
-void insertPoolInputtoQ(mqd_t mqdes, int** convRes, int numofmsg, int convResSize) {
+void insertPoolInputtoQ(mqd_t mqdes, int** convRes, int term, int max_prc, int upper_loop_i, int convResSize) {
 
-    unsigned int prio = numofmsg;
+    unsigned int prio = term;
     int arr[3][3] = { { 0, 0, 0 }, { 0, 0, 0 }, { 0, 0, 0 } };
 
-    for (int i = 0; i < convResSize; i += 2) {
-        for (int j = 0; j < convResSize; j += 2) {
-            for (int k = 0; k < 2; k++)
-                for (int l = 0; l < 2; l++)
-                    arr[k][l] = convRes[i + k][j + l];
+    for (int i = max_prc * upper_loop_i; i < max_prc * upper_loop_i + term; i++) {
 
-            if (mq_send(mqdes, (char*)arr, sizeof(arr), prio--) == -1) {
-                perror("max_pooling mq_send()");
+        for (int k = (i / (convResSize / 2)) * 2; k < (i / (convResSize / 2)) * 2 + 2; k++)
+            for (int l = (i % (convResSize / 2)) * 2; l < (i % (convResSize / 2)) * 2 + 2; l++) {
+                arr[k - (i / (convResSize / 2)) * 2][l - (i % (convResSize / 2)) * 2] = convRes[k][l];
             }
+
+        if (mq_send(mqdes, (char*)arr, sizeof(arr), prio--) == -1) {
+            perror("max_pooling mq_send()");
         }
     }
 }
 
-void receiveFinalRes(mqd_t mqdes, int* result, int numofmsg) {
+void receiveFinalRes(mqd_t mqdes, int max_prc, int upper_loop_i, int term, int* result) {
 
-    unsigned int prio = 0;
     int tmp = 0;
+    unsigned int prio = 0;
 
-    for (int i = 0; i < numofmsg; i++) {
+    for (int i = max_prc * upper_loop_i; i < max_prc * upper_loop_i + term; i++) {
         if (mq_receive(mqdes, (char*)&tmp, sizeof(tmp), &prio) == -1) {
             perror("mq_receive()");
         }
-        result[prio - 1] = tmp;
+        result[max_prc * upper_loop_i + term - prio] = tmp;
     }
 }
 
